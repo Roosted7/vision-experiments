@@ -77,7 +77,7 @@ def get_model_type(model_name: str) -> str:
     return 'unknown'
 
 
-def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half: bool = False) -> bool:
+def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half: bool = False, end2end: bool = False) -> bool:
     """Export YOLO model to ONNX using ultralytics."""
     try:
         from ultralytics import YOLO
@@ -113,6 +113,7 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half:
             format='onnx',
             imgsz=imgsz,
             half=half,
+            end2end=end2end,
             verbose=False,
             project=str(output_dir),
             name=model_name.replace('.pt', ''),
@@ -235,6 +236,7 @@ Examples:
     parser.add_argument('--output', '-o', type=str, default=None, help='Output directory (default: ./models)')
     parser.add_argument('--size', '-s', type=int, default=640, help='Input image size (default: 640)')
     parser.add_argument('--half', action='store_true', help='Export with FP16 half precision')
+    parser.add_argument('--end2end', action='store_true', default=False, help='Export with FP16 half precision')
     parser.add_argument('--list', '-l', action='store_true', help='List available models')
     
     args = parser.parse_args()
