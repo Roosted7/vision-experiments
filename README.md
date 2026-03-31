@@ -157,5 +157,8 @@ uv run export_models.py yolo26m --size 320 --format openvino --int8
 ```
 uv run camera_detect.py --model yolo26s-320 --image testdata/good_cam1_person.webp && open result.jpg 
 uv run camera_detect.py --model yolo26m-320-uint8 --image testdata/good_cam1_person.webp && open result.jpg
+
+
+uv run camera_detect.py --model yolo26s-320 --image testdata/bad_cam2-no-person.webp && open result.jpg
 ```
 
