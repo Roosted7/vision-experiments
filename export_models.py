@@ -84,7 +84,8 @@ def get_model_type(model_name: str) -> str:
 
 def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, 
                       half: bool = False, int8: bool = False, 
-                      export_format: str = 'onnx', end2end: bool = False) -> bool:
+                      export_format: str = 'onnx', end2end: bool = False,
+                      simplify: bool = False) -> bool:
     """Export YOLO model to ONNX or OpenVINO using ultralytics."""
     try:
         from ultralytics import YOLO
@@ -103,6 +104,8 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
         # Determine output filename - append suffixes for non-default options
         base_name = model_name.replace('.pt', '')
         suffixes = []
+        if simplify:
+            suffixes.append('simplified')
         if imgsz != 640:
             suffixes.append(str(imgsz))
         
@@ -148,7 +151,7 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
             half=half,
             int8=int8,
             end2end=end2end,
-            simplify=True,
+            simplify=simplify,
             verbose=False,
             project=str(output_dir),
             name=model_name.replace('.pt', ''),
@@ -171,8 +174,8 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
                     shutil.move(str(exported_path), str(output_path))
                 
                 # Check for .xml and .bin files
-                xml_file = output_path / f"{output_dirname}.xml"
-                bin_file = output_path / f"{output_dirname}.bin"
+                xml_file = output_path / f"{model_name}.xml"
+                bin_file = output_path / f"{model_name}.bin"
                 
                 if xml_file.exists() and bin_file.exists():
                     print(f"✅ Successfully exported: {model_name}")
@@ -300,6 +303,9 @@ Examples:
   python export_models.py yolo26n --format openvino --half
   python export_models.py yolo26n --format openvino --int8
   python export_models.py yolov8n --format openvino --size 640 --int8
+
+  # Simplified ONNX model (adds -simplified suffix to output)
+  python export_models.py yolo26n --simplify
         """
     )
     parser.add_argument('model', nargs='?', help='Model name (e.g., yolo26n, yolov8s, rtdetr-l) or "all"')
@@ -311,6 +317,8 @@ Examples:
                         choices=['onnx', 'openvino'],
                         help='Export format (default: onnx)')
     parser.add_argument('--end2end', action='store_true', default=False, help='Export with end2end NMS')
+    parser.add_argument('--simplify', action='store_true', default=False, 
+                        help='Apply simplification to ONNX model (adds -simplified suffix to output)')
     parser.add_argument('--list', '-l', action='store_true', help='List available models')
     
     args = parser.parse_args()
@@ -355,7 +363,8 @@ Examples:
             half=args.half, 
             int8=args.int8,
             export_format=args.format,
-            end2end=args.end2end
+            end2end=args.end2end,
+            simplify=args.simplify
         )
     elif model_type == 'other':
         # Download pre-exported ONNX model

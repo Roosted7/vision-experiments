@@ -32,6 +32,13 @@ except ImportError as e:
     print("   Install with: uv pip install opencv-python onnxruntime")
     sys.exit(1)
 
+# Try to import OpenVINO (optional)
+try:
+    import openvino as ov
+    OPENVINO_AVAILABLE = True
+except ImportError:
+    OPENVINO_AVAILABLE = False
+
 # COCO class names
 COCO_CLASSES = [
     'person', 'bicycle', 'car', 'motorcycle', 'airplane', 'bus', 'train', 'truck', 'boat',
@@ -402,6 +409,233 @@ class ONNXDetector:
             return self.postprocess_rtdetr(outputs, ratio, (pad_w, pad_h))
 
 
+class OpenVINODetector:
+    """Object detector using OpenVINO models."""
+
+    def __init__(self, model_dir: str, conf_threshold: float = 0.25,
+                 iou_threshold: float = 0.45, input_size: Tuple[int, int] = (640, 640)):
+        """
+        Initialize the detector with an OpenVINO model.
+
+        Args:
+            model_dir: Path to OpenVINO model directory (contains .xml and .bin)
+            conf_threshold: Confidence threshold for detections
+            iou_threshold: IoU threshold for NMS
+            input_size: Input image size (width, height)
+        """
+        self.conf_threshold = conf_threshold
+        self.iou_threshold = iou_threshold
+        self.input_size = input_size
+
+        model_path = Path(model_dir)
+        # Find any .xml file in the directory
+        xml_files = list(model_path.glob('*.xml'))
+        if not xml_files:
+            raise FileNotFoundError(f"No .xml file found in {model_dir}")
+        xml_file = xml_files[0]
+        
+        print(f"📦 Loading OpenVINO model: {xml_file}")
+        
+        # Initialize OpenVINO core
+        core = ov.Core()
+        
+        # Read model
+        self.model = core.read_model(str(xml_file))
+        
+        # Get input shape
+        self.input_tensor = self.model.inputs[0]
+        self.input_name = self.input_tensor.any_name
+        input_shape = self.input_tensor.shape
+        print(f"   Input shape: {input_shape}")
+        
+        # Compile model for CPU (can be changed to GPU)
+        self.compiled_model = core.compile_model(self.model, "CPU")
+        self.infer_request = self.compiled_model.create_infer_request()
+        
+        # Get output
+        self.output_tensor = self.compiled_model.outputs[0]
+        # Handle case where tensor has no name
+        try:
+            self.output_name = self.output_tensor.any_name
+        except RuntimeError:
+            self.output_name = None
+        output_shape = self.output_tensor.shape
+        print(f"   Output shape: {output_shape}")
+        
+        # Determine model type based on output structure
+        self._detect_model_type(output_shape)
+
+    def _detect_model_type(self, output_shape):
+        """Detect model type from output shape."""
+        print(f"   Output shapes: {[self.output_tensor.shape]}")
+        
+        # OpenVINO output format for YOLO:
+        # (1, 84, 8400) - same as ONNX YOLO
+        if len(output_shape) == 3:
+            _, num_classes, num_anchors = output_shape
+            # num_classes = 84 means 80 classes + 4 bbox coords
+            if num_classes == 84:
+                self.model_type = 'yolo'
+            else:
+                self.model_type = 'yolo'
+        else:
+            self.model_type = 'yolo'
+        
+        print(f"   Model type: {self.model_type}")
+
+    def preprocess(self, image: np.ndarray) -> Tuple[np.ndarray, float, Tuple[int, int]]:
+        """Preprocess image for inference using letterboxing."""
+        # Get original and target shape
+        original_h, original_w = image.shape[:2]
+        target_h, target_w = self.input_size
+
+        # Calculate scaling ratio
+        ratio = min(target_w / original_w, target_h / original_h)
+
+        # Calculate new dimensions and padding
+        new_w = int(original_w * ratio)
+        new_h = int(original_h * ratio)
+        pad_w = (target_w - new_w) // 2
+        pad_h = (target_h - new_h) // 2
+
+        # Resize image with aspect ratio preservation
+        if (new_w, new_h) != (original_w, original_h):
+            resized_img = cv2.resize(image, (new_w, new_h), interpolation=cv2.INTER_LINEAR)
+        else:
+            resized_img = image
+
+        # Create a padded image (letterbox)
+        padded_img = np.full((target_h, target_w, 3), 114, dtype=np.uint8)
+        padded_img[pad_h:pad_h + new_h, pad_w:pad_w + new_w] = resized_img
+
+        # Normalize and transpose - OpenVINO expects (1, 3, H, W)
+        rgb = cv2.cvtColor(padded_img, cv2.COLOR_BGR2RGB)
+        normalized = rgb.astype(np.float32) / 255.0
+        transposed = np.transpose(normalized, (2, 0, 1))
+        batched = np.expand_dims(transposed, axis=0)
+
+        return batched, ratio, (pad_w, pad_h)
+
+    def postprocess_yolo(self, outputs: List[np.ndarray],
+                         ratio: float, pad: Tuple[int, int]) -> List:
+        """Postprocess YOLO outputs from OpenVINO.
+        
+        OpenVINO YOLO output format: [1, 84, 8400] - same as ONNX
+        """
+        predictions = outputs[0][0].T  # (8400, 84)
+
+        # Extract raw values
+        obj_scores_raw = predictions[:, 4:5]  # Objectness
+        class_scores_raw = predictions[:, 5:]  # Class scores
+
+        # Apply sigmoid
+        obj_scores = 1.0 / (1.0 + np.exp(-obj_scores_raw))
+        class_scores = 1.0 / (1.0 + np.exp(-class_scores_raw))
+        max_class_conf = np.max(class_scores, axis=1, keepdims=True)
+
+        # Combined confidence
+        combined_scores = (obj_scores * max_class_conf).flatten()
+
+        mask = combined_scores > self.conf_threshold
+        filtered = predictions[mask]
+
+        if len(filtered) == 0:
+            return []
+
+        # Extract boxes in center format (cx, cy, w, h)
+        cx = filtered[:, 0]
+        cy = filtered[:, 1]
+        w = filtered[:, 2]
+        h = filtered[:, 3]
+
+        # Convert to corner format (x1, y1, x2, y2)
+        x1 = cx - w / 2
+        y1 = cy - h / 2
+        x2 = cx + w / 2
+        y2 = cy + h / 2
+        boxes = np.column_stack([x1, y1, x2, y2])
+
+        # Get scores
+        obj_sigmoid = 1.0 / (1.0 + np.exp(-filtered[:, 4]))
+        class_conf = np.max(1.0 / (1.0 + np.exp(-filtered[:, 5:])), axis=1)
+        scores = obj_sigmoid * class_conf
+
+        # Get class IDs
+        class_scores_sigmoid = 1.0 / (1.0 + np.exp(-filtered[:, 5:]))
+        class_ids = np.argmax(class_scores_sigmoid, axis=1)
+
+        # Apply NMS
+        indices = self._nms(boxes, scores, self.iou_threshold)
+
+        pad_w, pad_h = pad
+        
+        results = []
+        for idx in indices:
+            box = boxes[idx]
+            x1 = (box[0] - pad_w) / ratio
+            y1 = (box[1] - pad_h) / ratio
+            x2 = (box[2] - pad_w) / ratio
+            y2 = (box[3] - pad_h) / ratio
+            
+            results.append({
+                'bbox': [int(x1), int(y1), int(x2), int(y2)],
+                'confidence': float(scores[idx]),
+                'class_id': int(class_ids[idx]),
+                'class_name': COCO_CLASSES[class_ids[idx]] if class_ids[idx] < len(COCO_CLASSES) else f'class_{class_ids[idx]}'
+            })
+
+        return results
+
+    def _nms(self, boxes: np.ndarray, scores: np.ndarray, iou_threshold: float) -> np.ndarray:
+        """Non-Maximum Suppression."""
+        if len(boxes) == 0:
+            return np.array([], dtype=np.int32)
+
+        x1 = boxes[:, 0]
+        y1 = boxes[:, 1]
+        x2 = boxes[:, 2]
+        y2 = boxes[:, 3]
+
+        areas = (x2 - x1) * (y2 - y1)
+        order = scores.argsort()[::-1]
+
+        keep = []
+        while len(order) > 0:
+            i = order[0]
+            keep.append(i)
+
+            if len(order) == 1:
+                break
+
+            xx1 = np.maximum(x1[i], x1[order[1:]])
+            yy1 = np.maximum(y1[i], y1[order[1:]])
+            xx2 = np.minimum(x2[i], x2[order[1:]])
+            yy2 = np.minimum(y2[i], y2[order[1:]])
+
+            w = np.maximum(0, xx2 - xx1)
+            h = np.maximum(0, yy2 - yy1)
+
+            intersection = w * h
+            union = areas[i] + areas[order[1:]] - intersection
+            iou = intersection / (union + 1e-6)
+
+            mask = iou <= iou_threshold
+            order = order[1:][mask]
+
+        return np.array(keep, dtype=np.int32)
+
+    def detect(self, image: np.ndarray) -> List:
+        """Detect objects in image."""
+        input_data, ratio, (pad_w, pad_h) = self.preprocess(image)
+
+        # Run inference
+        outputs = self.infer_request.infer({self.input_name: input_data})
+        output_data = list(outputs.values())
+
+        # Postprocess
+        return self.postprocess_yolo(output_data, ratio, (pad_w, pad_h))
+
+
 def draw_detections(image: np.ndarray, detections: List,
                     line_thickness: int = 2) -> np.ndarray:
     """Draw detection boxes on image."""
@@ -428,14 +662,23 @@ def draw_detections(image: np.ndarray, detections: List,
 
 
 def get_available_models(models_dir: str = './models') -> List[str]:
-    """Get list of available ONNX models."""
+    """Get list of available ONNX and OpenVINO models."""
     models_path = Path(models_dir)
     if not models_path.exists():
         return []
 
     models = []
+    # ONNX models
     for f in models_path.glob('*.onnx'):
         models.append(f.stem)
+    
+    # OpenVINO models (directories with any .xml files)
+    for d in models_path.iterdir():
+        if d.is_dir():
+            # Check for any .xml file in the directory
+            xml_files = list(d.glob('*.xml'))
+            if xml_files:
+                models.append(d.name)
 
     return sorted(models)
 
@@ -450,6 +693,8 @@ def extract_size_from_model(model_name: str) -> Optional[Tuple[int, int]]:
     - model.onnx (no suffix) -> None (use default 640)
     - model-half.onnx -> None (use default 640)
     - model-uint8.onnx -> None (use default 640)
+    - model-simplified.onnx -> None (use default 640)
+    - model-simplified-640.onnx -> (640, 640)
 
     Args:
         model_name: Model name (with or without .onnx extension)
@@ -464,10 +709,10 @@ def extract_size_from_model(model_name: str) -> Optional[Tuple[int, int]]:
 
     # Match patterns like: name-640 or name-640x480
     # Note: 000 is treated as "no suffix" (use default)
-    # Also handles precision suffixes like -half, -uint8 before size
+    # Also handles precision suffixes like -half, -uint8, -simplified before size
     patterns = [
-        r'-(\d{3,4})x(\d{3,4})(?::-half|-uint8)?$',  # name-640x480 or name-640x480-half
-        r'-(\d{3,4})(?::-half|-uint8)?$',             # name-640 or name-640-half
+        r'-(\d{3,4})x(\d{3,4})(?:-(?:half|uint8|simplified))*$',  # name-640x480 or name-640x480-half or name-640x480-simplified
+        r'-(\d{3,4})(?:-(?:half|uint8|simplified))*$',             # name-640 or name-640-half or name-640-simplified
     ]
 
     for pattern in patterns:
@@ -506,8 +751,10 @@ def extract_precision_from_model(model_name: str) -> Optional[str]:
     Supports formats like:
     - model-half.onnx -> 'half'
     - model-uint8.onnx -> 'uint8'
+    - model-simplified.onnx -> None (simplified is not precision)
     - model-640-half.onnx -> 'half'
     - model-640-uint8.onnx -> 'uint8'
+    - model-simplified-640-half.onnx -> 'half'
     - model.onnx -> None (default precision)
 
     Args:
@@ -520,6 +767,10 @@ def extract_precision_from_model(model_name: str) -> Optional[str]:
 
     # Remove .onnx extension if present
     name = model_name.replace('.onnx', '')
+
+    # Remove -simplified suffix first (it's not a precision type)
+    name = re.sub(r'-simplified$', '', name)
+    name = re.sub(r'-simplified-', '-', name)
 
     # Match patterns with precision suffix at the end
     patterns = [
@@ -597,7 +848,7 @@ def main():
     # List available models
     if args.list_models:
         models = get_available_models(args.models_dir)
-        print("Available ONNX models:")
+        print("Available models (ONNX and OpenVINO):")
         if models:
             for m in models:
                 print(f"  - {m}")
@@ -606,8 +857,9 @@ def main():
             print("  Run: python export_models.py all")
         return
 
-    # Find model file - ONNX format
+    # Find model file - ONNX or OpenVINO format
     model_path = None
+    model_format = None
     
     # First try ONNX format
     onnx_path = Path(args.models_dir) / f"{args.model}.onnx"
@@ -615,12 +867,22 @@ def main():
         model_path = onnx_path
         model_format = 'onnx'
     
-    # Try alternative paths if not found
+    # Try with -simplified suffix if not found
+    if model_path is None:
+        simplified_path = Path(args.models_dir) / f"{args.model}-simplified.onnx"
+        if simplified_path.exists():
+            model_path = simplified_path
+            model_format = 'onnx'
+    
+    # Try alternative paths for ONNX if not found
     if model_path is None:
         alt_paths = [
             Path(args.models_dir) / f"{args.model}.onnx",
+            Path(args.models_dir) / f"{args.model}-simplified.onnx",
             Path.cwd() / args.models_dir / f"{args.model}.onnx",
+            Path.cwd() / args.models_dir / f"{args.model}-simplified.onnx",
             Path(__file__).parent / args.models_dir / f"{args.model}.onnx",
+            Path(__file__).parent / args.models_dir / f"{args.model}-simplified.onnx",
         ]
         
         for p in alt_paths:
@@ -628,6 +890,30 @@ def main():
                 model_path = p
                 model_format = 'onnx'
                 break
+    
+    # Try OpenVINO format (directory with .xml and .bin)
+    if model_path is None:
+        openvino_path = Path(args.models_dir) / args.model
+        if openvino_path.is_dir():
+            # Find any .xml file in the directory
+            xml_files = list(openvino_path.glob('*.xml'))
+            if xml_files:
+                model_path = openvino_path
+                model_format = 'openvino'
+    
+    # Try alternative paths for OpenVINO
+    if model_path is None:
+        alt_openvino_paths = [
+            Path.cwd() / args.models_dir / args.model,
+            Path(__file__).parent / args.models_dir / args.model,
+        ]
+        for p in alt_openvino_paths:
+            if p.is_dir():
+                xml_files = list(p.glob('*.xml'))
+                if xml_files:
+                    model_path = p
+                    model_format = 'openvino'
+                    break
 
     if model_path is None:
         print(f"❌ Model not found: {args.model}.onnx or {args.model}/*.xml")
@@ -672,13 +958,28 @@ def main():
     if precision:
         print(f"⚡ Detected precision type: {precision}")
 
-    # Initialize detector
-    detector = ONNXDetector(
-        str(model_path),
-        conf_threshold=args.conf,
-        iou_threshold=args.iou,
-        input_size=input_size
-    )
+    # Initialize detector based on format
+    if model_format == 'onnx':
+        detector = ONNXDetector(
+            str(model_path),
+            conf_threshold=args.conf,
+            iou_threshold=args.iou,
+            input_size=input_size
+        )
+    elif model_format == 'openvino':
+        if not OPENVINO_AVAILABLE:
+            print("❌ OpenVINO is not installed.")
+            print("   Install with: uv pip install openvino")
+            sys.exit(1)
+        detector = OpenVINODetector(
+            str(model_path),
+            conf_threshold=args.conf,
+            iou_threshold=args.iou,
+            input_size=input_size
+        )
+    else:
+        print(f"❌ Unknown model format: {model_format}")
+        sys.exit(1)
 
     if args.image:
         # Process a single image

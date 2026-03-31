@@ -141,3 +141,20 @@ python camera_detect.py --model yolov9s
 - The camera detection requires a working camera device. Use `v4l2-ctl --list-devices` to check available cameras on Linux.
 - ONNX Runtime will use CUDA if available, otherwise falls back to CPU.
 - Models are loaded from the `./models/` directory by default.
+
+## Example Usage
+
+### Model export
+
+```
+uv run export_models.py yolo26s --size 320
+uv run export_models.py yolo26m --size 320 --format openvino --int8
+```
+
+### Detection
+
+```
+uv run camera_detect.py --model yolo26m-320-uint8 --show-fps --image testdata/cam1_person.webp && open result.jpg
+uv run camera_detect.py --model yolo26s-320 --show-fps --image testdata/cam1_person.webp && open result.jpg 
+```
+
