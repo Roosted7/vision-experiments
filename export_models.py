@@ -77,7 +77,7 @@ def get_model_type(model_name: str) -> str:
     return 'unknown'
 
 
-def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half: bool = False, end2end: bool = False) -> bool:
+def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half: bool = False, int8: bool = False, end2end: bool = False) -> bool:
     """Export YOLO model to ONNX using ultralytics."""
     try:
         from ultralytics import YOLO
@@ -93,18 +93,28 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half:
         print(f"📥 Loading YOLO model: {model_path}")
         model = YOLO(model_path)
         
-        # Determine output filename - append size suffix for non-default sizes
+        # Determine output filename - append suffixes for non-default options
         base_name = model_name.replace('.pt', '')
+        suffixes = []
         if imgsz != 640:
-            # Non-default size: append to filename (e.g., yolo26s-1280.onnx)
-            output_filename = f"{base_name}-{imgsz}.onnx"
+            suffixes.append(str(imgsz))
+        if int8:
+            suffixes.append('uint8')
+        elif half:
+            suffixes.append('half')
+        
+        if suffixes:
+            output_filename = f"{base_name}-{'-'.join(suffixes)}.onnx"
         else:
-            # Default size: no suffix (e.g., yolo26s.onnx)
             output_filename = f"{base_name}.onnx"
         output_path = output_dir / output_filename
         
         print(f"📦 Exporting to ONNX: {output_path}")
         print(f"   Input size: {imgsz}")
+        if int8:
+            print(f"   Quantization: UINT8")
+        elif half:
+            print(f"   Precision: Half (FP16)")
         
         # Export using ultralytics
         # The export method returns the path to the exported model
@@ -113,6 +123,7 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half:
             format='onnx',
             imgsz=imgsz,
             half=half,
+            int8=int8,
             end2end=end2end,
             verbose=False,
             project=str(output_dir),
@@ -227,6 +238,8 @@ Examples:
   python export_models.py yolo11n
   python export_models.py yolo26n --size 1280
   python export_models.py yolo26s
+  python export_models.py yolo11n --int8
+  python export_models.py yolov8n --half
   python export_models.py rtdetr-l
   python export_models.py all
   python export_models.py --list
@@ -236,7 +249,8 @@ Examples:
     parser.add_argument('--output', '-o', type=str, default=None, help='Output directory (default: ./models)')
     parser.add_argument('--size', '-s', type=int, default=640, help='Input image size (default: 640)')
     parser.add_argument('--half', action='store_true', help='Export with FP16 half precision')
-    parser.add_argument('--end2end', action='store_true', default=False, help='Export with FP16 half precision')
+    parser.add_argument('--int8', action='store_true', help='Export with INT8 quantization')
+    parser.add_argument('--end2end', action='store_true', default=False, help='Export with end2end NMS')
     parser.add_argument('--list', '-l', action='store_true', help='List available models')
     
     args = parser.parse_args()
@@ -267,7 +281,7 @@ Examples:
     
     if model_type == 'yolo':
         # Export YOLO model using ultralytics
-        export_yolo_model(model_name, output_dir, imgsz=args.size, half=args.half)
+        export_yolo_model(model_name, output_dir, imgsz=args.size, half=args.half, int8=args.int8)
     elif model_type == 'other':
         # Download pre-exported ONNX model
         download_onnx_model(model_name, output_dir)

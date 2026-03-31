@@ -446,6 +446,8 @@ def extract_size_from_model(model_name: str) -> Optional[Tuple[int, int]]:
     - model-640x480.onnx -> (640, 480)
     - model-000.onnx -> None (use default 640)
     - model.onnx (no suffix) -> None (use default 640)
+    - model-half.onnx -> None (use default 640)
+    - model-uint8.onnx -> None (use default 640)
 
     Args:
         model_name: Model name (with or without .onnx extension)
@@ -460,27 +462,72 @@ def extract_size_from_model(model_name: str) -> Optional[Tuple[int, int]]:
 
     # Match patterns like: name-640 or name-640x480
     # Note: 000 is treated as "no suffix" (use default)
+    # Also handles precision suffixes like -half, -uint8 before size
     patterns = [
-        r'-(\d{3,4})x(\d{3,4})$',  # name-640x480
-        r'-(\d{3,4})$',             # name-640
+        r'-(\d{3,4})x(\d{3,4})(?:-(half|uint8))?$',  # name-640x480 or name-640x480-half
+        r'-(\d{3,4})(?:-(half|uint8))?$',             # name-640 or name-640-half
     ]
 
     for pattern in patterns:
         match = re.search(pattern, name)
         if match:
-            if len(match.groups()) == 2:
-                # name-640x480 format
-                width = int(match.group(1))
-                height = int(match.group(2))
-            else:
-                # name-640 format (square)
-                size = int(match.group(1))
-                if size == 0:
-                    # 000 means "use default" (not a valid size)
-                    return None
-                width = height = size
+            if len(match.groups()) >= 2 and match.group(2) is not None:
+                if len(match.groups()) == 4 and match.group(2):
+                    # name-640x480 format with precision suffix
+                    width = int(match.group(1))
+                    height = int(match.group(2))
+                elif len(match.groups()) == 2 or (len(match.groups()) >= 3 and match.group(2) and not match.group(3)):
+                    # name-640 format (square)
+                    size = int(match.group(1))
+                    if size == 0:
+                        # 000 means "use default" (not a valid size)
+                        return None
+                    width = height = size
+                else:
+                    continue
+                return (width, height)
 
-            return (width, height)
+    return None
+
+
+def extract_precision_from_model(model_name: str) -> Optional[str]:
+    """Extract precision type from model name.
+
+    Supports formats like:
+    - model-half.onnx -> 'half'
+    - model-uint8.onnx -> 'uint8'
+    - model-640-half.onnx -> 'half'
+    - model-640-uint8.onnx -> 'uint8'
+    - model.onnx -> None (default precision)
+
+    Args:
+        model_name: Model name (with or without .onnx extension)
+
+    Returns:
+        String indicating precision type ('half', 'uint8') or None for default
+    """
+    import re
+
+    # Remove .onnx extension if present
+    name = model_name.replace('.onnx', '')
+
+    # Match patterns with precision suffix at the end
+    patterns = [
+        r'-half$',
+        r'-uint8$',
+        r'-(half|uint8)(?:-\d+)?$',  # Also handles size suffix before precision
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, name)
+        if match:
+            if match.group(1):
+                return match.group(1)
+            # Check if -half or -uint8 is in the match
+            if 'half' in match.group(0):
+                return 'half'
+            elif 'uint8' in match.group(0):
+                return 'uint8'
 
     return None
 
@@ -600,6 +647,11 @@ def main():
         else:
             input_size = (640, 640)  # Default
             print(f"📐 Using default input size: {input_size}")
+
+    # Auto-detect precision type from model name
+    precision = extract_precision_from_model(args.model)
+    if precision:
+        print(f"⚡ Detected precision type: {precision}")
 
     # Initialize detector
     detector = ONNXDetector(
