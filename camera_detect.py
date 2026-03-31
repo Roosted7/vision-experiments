@@ -536,10 +536,13 @@ class OpenVINODetector:
         sigmoid_applied = rest.max() <= 1.0
         
         if sigmoid_applied:
-            # For quantized models (uint8), scores are often pre-sigmoid
-            # Use index 4 directly as confidence score
+            # For quantized models (int8), class scores are poorly discriminative
+            # Use index 4 as confidence and pick class based on raw scores
             scores = predictions[:, 4]
-            class_ids = np.argmax(rest[:, 1:], axis=1)  # Skip index 4, use 5 onwards for class
+            class_scores_raw = rest[:, 1:]  # Skip index 4, use 5 onwards
+            
+            # Use raw logits for class determination
+            class_ids = np.argmax(class_scores_raw, axis=1)
         else:
             # Apply sigmoid to raw values
             obj_scores = 1.0 / (1.0 + np.exp(-predictions[:, 4]))
@@ -678,6 +681,28 @@ def draw_detections(image: np.ndarray, detections: List,
                     cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 0), 1)
 
     return image
+
+
+def print_detections(detections: List, prefix: str = "  ") -> None:
+    """Print detection results in a nice readable format."""
+    if not detections:
+        return
+    
+    print("\n" + "=" * 60)
+    print("🔍 DETECTIONS")
+    print("=" * 60)
+    print(f"{'Class ID':<10} {'Label':<20} {'Confidence':<12}")
+    print("-" * 60)
+    
+    for i, det in enumerate(detections, 1):
+        class_id = det['class_id']
+        label = det['class_name']
+        conf = det['confidence']
+        print(f"{class_id:<10} {label:<20} {conf:.2%}")
+    
+    print("-" * 60)
+    print(f"Total objects detected: {len(detections)}")
+    print("=" * 60)
 
 
 def get_available_models(models_dir: str = './models') -> List[str]:
@@ -1013,6 +1038,9 @@ def main():
         # Run detection
         detections = detector.detect(frame)
 
+        # Print detection results to console
+        print_detections(detections)
+
         # Draw detections
         frame = draw_detections(frame, detections)
 
@@ -1054,6 +1082,10 @@ def main():
         fps_counter = 0
         fps_start = time.time()
         current_fps = 0
+        
+        # Track previous detection state to avoid printing every frame
+        prev_detect_count = 0
+        prev_detect_labels = set()
 
         while True:
             ret, frame = cap.read()
@@ -1063,6 +1095,14 @@ def main():
 
             # Run detection
             detections = detector.detect(frame)
+            
+            # Print detections when they change (new objects detected or cleared)
+            current_labels = set(d['class_name'] for d in detections)
+            current_count = len(detections)
+            if current_count != prev_detect_count or current_labels != prev_detect_labels:
+                print_detections(detections)
+                prev_detect_count = current_count
+                prev_detect_labels = current_labels
 
             # Draw detections
             frame = draw_detections(frame, detections)
