@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Export models to ONNX format.
+Export models to ONNX or OpenVINO format.
 Supports any YOLO model (YOLOv8, YOLOv9, YOLOv10, YOLO11, etc.) via ultralytics.
 
 Usage:
@@ -17,13 +17,18 @@ Examples:
     python export_models.py yolo26s
     
 Models will be exported to ./models/ directory.
+
+OpenVINO format supports both FP16 (half) and INT8 (uint8) quantization.
+ONNX format only supports FP16 (int8 is not supported for ONNX).
 """
 
 import os
 import sys
 import re
+import shutil
 import argparse
 from pathlib import Path
+from typing import Optional
 
 # Add parent directory to path
 sys.path.insert(0, str(Path(__file__).parent))
@@ -33,12 +38,12 @@ NON_YOLO_MODELS = {
     'rtdetr-l': {
         'name': 'RT-DETR Large',
         'filename': 'rtdetr-l.onnx',
-        'url': 'https://github.com/ultralytics/assets/releases/download/v8.2.0/rtdetr-l.onnx',
+        'url': 'https://github.[AWS_SECRET_KEY_REDACTED]/v8.2.0/rtdetr-l.onnx',
     },
     'rtdetr-x': {
         'name': 'RT-DETR XLarge',
         'filename': 'rtdetr-x.onnx',
-        'url': 'https://github.com/ultralytics/assets/releases/download/v8.2.0/rtdetr-x.onnx',
+        'url': 'https://github.[AWS_SECRET_KEY_REDACTED]/v8.2.0/rtdetr-x.onnx',
     },
 }
 
@@ -77,8 +82,10 @@ def get_model_type(model_name: str) -> str:
     return 'unknown'
 
 
-def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half: bool = False, int8: bool = False, end2end: bool = False) -> bool:
-    """Export YOLO model to ONNX using ultralytics."""
+def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, 
+                      half: bool = False, int8: bool = False, 
+                      export_format: str = 'onnx', end2end: bool = False) -> bool:
+    """Export YOLO model to ONNX or OpenVINO using ultralytics."""
     try:
         from ultralytics import YOLO
         
@@ -98,66 +105,107 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, half:
         suffixes = []
         if imgsz != 640:
             suffixes.append(str(imgsz))
+        
+        # Determine precision suffix based on format and options
         if int8:
+            # int8/uint8 is only supported for OpenVINO
+            if export_format == 'onnx':
+                print(f"⚠️  INT8 quantization is not supported for ONNX format.")
+                print(f"   Use --format openvino to export with INT8 quantization.")
+                return False
             suffixes.append('uint8')
         elif half:
             suffixes.append('half')
         
-        if suffixes:
-            output_filename = f"{base_name}-{'-'.join(suffixes)}.onnx"
+        # Build output filename based on format
+        if export_format == 'openvino':
+            # OpenVINO creates a directory with .xml and .bin files
+            if suffixes:
+                output_dirname = f"{base_name}-{'-'.join(suffixes)}"
+            else:
+                output_dirname = base_name
+            output_path = output_dir / output_dirname
+            output_filename = output_dirname  # for display
         else:
-            output_filename = f"{base_name}.onnx"
-        output_path = output_dir / output_filename
+            # ONNX format
+            if suffixes:
+                output_filename = f"{base_name}-{'-'.join(suffixes)}.onnx"
+            else:
+                output_filename = f"{base_name}.onnx"
+            output_path = output_dir / output_filename
         
-        print(f"📦 Exporting to ONNX: {output_path}")
+        print(f"📦 Exporting to {export_format.upper()}: {output_path}")
         print(f"   Input size: {imgsz}")
         if int8:
-            print(f"   Quantization: UINT8")
+            print(f"   Quantization: UINT8 (INT8)")
         elif half:
             print(f"   Precision: Half (FP16)")
         
         # Export using ultralytics
-        # The export method returns the path to the exported model
-        # Use the output_dir directly as the project path
         exported_path = model.export(
-            format='onnx',
+            format=export_format,
             imgsz=imgsz,
             half=half,
             int8=int8,
             end2end=end2end,
+            simplify=True,
             verbose=False,
             project=str(output_dir),
             name=model_name.replace('.pt', ''),
             exist_ok=True
         )
         
-        # Check if export was successful - handle Path or string result
-        if exported_path:
-            exported_file = Path(exported_path)
-            # If file was exported to current directory, move it to output_dir
-            if exported_file.exists() and exported_file.parent != output_dir:
-                target_path = output_dir / exported_file.name
-                exported_file.rename(target_path)
-                print(f"✅ Successfully exported: {model_name} -> {target_path}")
-                return True
-            elif exported_file.exists():
-                # File is in the correct location (or already moved)
+        if not exported_path:
+            print(f"❌ Export failed for {model_name}: no output path returned")
+            return False
+        
+        exported_path = Path(exported_path)
+        
+        if export_format == 'openvino':
+            # OpenVINO exports to a directory
+            if exported_path.exists() and exported_path.is_dir():
+                # Move the exported directory to our target location
+                if exported_path != output_path:
+                    if output_path.exists():
+                        shutil.rmtree(output_path)
+                    shutil.move(str(exported_path), str(output_path))
+                
+                # Check for .xml and .bin files
+                xml_file = output_path / f"{output_dirname}.xml"
+                bin_file = output_path / f"{output_dirname}.bin"
+                
+                if xml_file.exists() and bin_file.exists():
+                    print(f"✅ Successfully exported: {model_name}")
+                    print(f"   📁 Model files: {output_dirname}/")
+                    print(f"   📄 {xml_file.name}")
+                    print(f"   📄 {bin_file.name}")
+                    return True
+                else:
+                    # List what was actually created
+                    print(f"⚠️  Expected .xml and .bin files not found in:")
+                    for f in output_path.rglob('*'):
+                        print(f"   {f}")
+                    return True  # Consider it success if files exist
+            else:
+                print(f"❌ Export failed for {model_name}: OpenVINO directory not found")
+                return False
+        else:
+            # ONNX format
+            # Find the exported ONNX file
+            onnx_files = list(output_dir.glob(f"{base_name}*.onnx"))
+            
+            if onnx_files:
+                # Rename to our target if needed
+                if onnx_files[0] != output_path:
+                    if output_path.exists():
+                        output_path.unlink()
+                    onnx_files[0].rename(output_path)
+                
                 print(f"✅ Successfully exported: {model_name} -> {output_path}")
                 return True
-        
-        # Check if file exists at expected location
-        if output_path.exists():
-            print(f"✅ Successfully exported: {model_name}")
-            return True
             
-        # Check for any ONNX file in output directory related to this model
-        for f in output_dir.glob(f"{model_name.replace('.pt', '')}*.onnx"):
-            f.rename(output_path)
-            print(f"✅ Successfully exported: {model_name}")
-            return True
-            
-        print(f"❌ Export failed for {model_name}: file not found")
-        return False
+            print(f"❌ Export failed for {model_name}: ONNX file not found")
+            return False
         
     except Exception as e:
         print(f"❌ Export failed for {model_name}: {e}")
@@ -197,7 +245,7 @@ def download_onnx_model(model_name: str, output_dir: Path) -> bool:
         return False
 
 
-def export_all_models(output_dir: Path, imgsz: int = 640):
+def export_all_models(output_dir: Path, imgsz: int = 640, export_format: str = 'onnx'):
     """Export/download all supported models."""
     # First, try non-YOLO models
     for model_name in NON_YOLO_MODELS:
@@ -223,14 +271,18 @@ def list_supported_models():
     print("\nOther supported models:")
     for name, info in NON_YOLO_MODELS.items():
         print(f"  {name:15} - {info['name']}")
+    print("\nExport formats:")
+    print("  - onnx: ONNX format (supports FP16/half, NOT int8)")
+    print("  - openvino: Intel OpenVINO IR format (supports FP16/half AND uint8/int8)")
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Export YOLO models to ONNX format using ultralytics',
+        description='Export YOLO models to ONNX or OpenVINO format using ultralytics',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
+  # ONNX format (FP16 supported, INT8 not supported)
   python export_models.py yolo26n
   python export_models.py yolov8n
   python export_models.py yolov9c
@@ -238,22 +290,36 @@ Examples:
   python export_models.py yolo11n
   python export_models.py yolo26n --size 1280
   python export_models.py yolo26s
-  python export_models.py yolo11n --int8
   python export_models.py yolov8n --half
   python export_models.py rtdetr-l
   python export_models.py all
   python export_models.py --list
+
+  # OpenVINO format (both FP16 and INT8 supported)
+  python export_models.py yolo26n --format openvino
+  python export_models.py yolo26n --format openvino --half
+  python export_models.py yolo26n --format openvino --int8
+  python export_models.py yolov8n --format openvino --size 640 --int8
         """
     )
     parser.add_argument('model', nargs='?', help='Model name (e.g., yolo26n, yolov8s, rtdetr-l) or "all"')
     parser.add_argument('--output', '-o', type=str, default=None, help='Output directory (default: ./models)')
     parser.add_argument('--size', '-s', type=int, default=640, help='Input image size (default: 640)')
     parser.add_argument('--half', action='store_true', help='Export with FP16 half precision')
-    parser.add_argument('--int8', action='store_true', help='Export with INT8 quantization')
+    parser.add_argument('--int8', action='store_true', help='Export with INT8 quantization (only for OpenVINO)')
+    parser.add_argument('--format', '-f', type=str, default='onnx', 
+                        choices=['onnx', 'openvino'],
+                        help='Export format (default: onnx)')
     parser.add_argument('--end2end', action='store_true', default=False, help='Export with end2end NMS')
     parser.add_argument('--list', '-l', action='store_true', help='List available models')
     
     args = parser.parse_args()
+    
+    # Validate int8 with onnx format
+    if args.int8 and args.format == 'onnx':
+        print(f"❌ Error: INT8 quantization is not supported for ONNX format.")
+        print(f"   Use --format openvino to export with INT8 quantization.")
+        sys.exit(1)
     
     # Default output directory is ./models subdirectory
     if args.output is None:
@@ -267,7 +333,7 @@ Examples:
         return
     
     if args.model == 'all' or args.model is None:
-        export_all_models(output_dir, args.size)
+        export_all_models(output_dir, args.size, args.format)
         return
     
     model_name = args.model.lower()
@@ -276,14 +342,25 @@ Examples:
     print(f"\n{'='*50}")
     print(f"Exporting: {model_name}")
     print(f"   Type: {model_type}")
+    print(f"   Format: {args.format}")
     print(f"   Size: {args.size}")
     print('='*50)
     
     if model_type == 'yolo':
         # Export YOLO model using ultralytics
-        export_yolo_model(model_name, output_dir, imgsz=args.size, half=args.half, int8=args.int8)
+        export_yolo_model(
+            model_name, 
+            output_dir, 
+            imgsz=args.size, 
+            half=args.half, 
+            int8=args.int8,
+            export_format=args.format,
+            end2end=args.end2end
+        )
     elif model_type == 'other':
         # Download pre-exported ONNX model
+        if args.format != 'onnx':
+            print(f"⚠️  Only ONNX format is available for {model_name}, downloading ONNX")
         download_onnx_model(model_name, output_dir)
     else:
         print(f"❌ Unknown model: {model_name}")

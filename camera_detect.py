@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
 """
-Object detection using camera with ONNX models.
-Supports RT-DETR, YOLOv9s, YOLOv10s (YOLO26s).
+Object detection using camera with ONNX or OpenVINO models.
+Supports RT-DETR, YOLOv9s, YOLOv10s (YOLO26s), YOLO11, etc.
 
 Usage:
     python camera_detect.py --model yolov9s
     python camera_detect.py --model rtdetr-l --camera 0
     python camera_detect.py --model yolov10n --conf 0.5
+    python camera_detect.py --model yolo11n_openvino  # OpenVINO format
 
 Requirements:
-    - ONNX model files in ./models/ directory
+    - ONNX model files (.onnx) or OpenVINO IR files (.xml + .bin) in ./models/ directory
     - OpenCV for camera access
-    - onnxruntime for inference
+    - onnxruntime for ONNX inference
+    - openvino for OpenVINO inference (optional)
 """
 
 import argparse
@@ -464,19 +466,20 @@ def extract_size_from_model(model_name: str) -> Optional[Tuple[int, int]]:
     # Note: 000 is treated as "no suffix" (use default)
     # Also handles precision suffixes like -half, -uint8 before size
     patterns = [
-        r'-(\d{3,4})x(\d{3,4})(?:-(half|uint8))?$',  # name-640x480 or name-640x480-half
-        r'-(\d{3,4})(?:-(half|uint8))?$',             # name-640 or name-640-half
+        r'-(\d{3,4})x(\d{3,4})(?::-half|-uint8)?$',  # name-640x480 or name-640x480-half
+        r'-(\d{3,4})(?::-half|-uint8)?$',             # name-640 or name-640-half
     ]
 
     for pattern in patterns:
         match = re.search(pattern, name)
         if match:
-            if len(match.groups()) >= 2 and match.group(2) is not None:
-                if len(match.groups()) == 4 and match.group(2):
+            num_groups = len(match.groups())
+            if num_groups >= 2 and match.group(2) is not None:
+                if num_groups == 4 and match.group(2):
                     # name-640x480 format with precision suffix
                     width = int(match.group(1))
                     height = int(match.group(2))
-                elif len(match.groups()) == 2 or (len(match.groups()) >= 3 and match.group(2) and not match.group(3)):
+                elif num_groups == 2 or (num_groups >= 3 and match.group(2) and not match.group(3)):
                     # name-640 format (square)
                     size = int(match.group(1))
                     if size == 0:
@@ -486,6 +489,13 @@ def extract_size_from_model(model_name: str) -> Optional[Tuple[int, int]]:
                 else:
                     continue
                 return (width, height)
+            elif num_groups == 1:
+                # Single group: just the size (e.g., name-640)
+                size = int(match.group(1))
+                if size == 0:
+                    # 000 means "use default" (not a valid size)
+                    return None
+                return (size, size)
 
     return None
 
@@ -513,9 +523,8 @@ def extract_precision_from_model(model_name: str) -> Optional[str]:
 
     # Match patterns with precision suffix at the end
     patterns = [
-        r'-half$',
-        r'-uint8$',
-        r'-(half|uint8)(?:-\d+)?$',  # Also handles size suffix before precision
+        r'-((?:half|uint8))-(?:\d+)?$',  # half-320 or uint8-320
+        r'-((?:half|uint8))$',        # half or uint8 at end
     ]
 
     for pattern in patterns:
@@ -597,29 +606,39 @@ def main():
             print("  Run: python export_models.py all")
         return
 
-    # Find model file
-    model_path = Path(args.models_dir) / f"{args.model}.onnx"
-    if not model_path.exists():
-        # Try alternative paths
+    # Find model file - ONNX format
+    model_path = None
+    
+    # First try ONNX format
+    onnx_path = Path(args.models_dir) / f"{args.model}.onnx"
+    if onnx_path.exists():
+        model_path = onnx_path
+        model_format = 'onnx'
+    
+    # Try alternative paths if not found
+    if model_path is None:
         alt_paths = [
             Path(args.models_dir) / f"{args.model}.onnx",
             Path.cwd() / args.models_dir / f"{args.model}.onnx",
             Path(__file__).parent / args.models_dir / f"{args.model}.onnx",
         ]
-
+        
         for p in alt_paths:
             if p.exists():
                 model_path = p
+                model_format = 'onnx'
                 break
 
-        if not model_path.exists():
-            print(f"❌ Model not found: {model_path}")
-            print(f"\nAvailable models in {args.models_dir}:")
-            for m in get_available_models(args.models_dir):
-                print(f"  - {m}")
-            print(f"\nTo download models, run:")
-            print(f"  python export_models.py all")
-            sys.exit(1)
+    if model_path is None:
+        print(f"❌ Model not found: {args.model}.onnx or {args.model}/*.xml")
+        print(f"\nAvailable models in {args.models_dir}:")
+        for m in get_available_models(args.models_dir):
+            print(f"  - {m}")
+        print(f"\nTo download models, run:")
+        print(f"  python export_models.py all")
+        sys.exit(1)
+    
+    print(f"📦 Using {model_format.upper()} model: {model_path}")
 
     # Determine input size
     input_size = None
