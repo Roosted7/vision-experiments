@@ -438,6 +438,53 @@ def get_available_models(models_dir: str = './models') -> List[str]:
     return sorted(models)
 
 
+def extract_size_from_model(model_name: str) -> Optional[Tuple[int, int]]:
+    """Extract input size from model name using numeric suffix.
+
+    Supports formats like:
+    - model-640.onnx -> (640, 640)
+    - model-640x480.onnx -> (640, 480)
+    - model-000.onnx -> None (use default 640)
+    - model.onnx (no suffix) -> None (use default 640)
+
+    Args:
+        model_name: Model name (with or without .onnx extension)
+
+    Returns:
+        Tuple of (width, height) or None if no size suffix found
+    """
+    import re
+
+    # Remove .onnx extension if present
+    name = model_name.replace('.onnx', '')
+
+    # Match patterns like: name-640 or name-640x480
+    # Note: 000 is treated as "no suffix" (use default)
+    patterns = [
+        r'-(\d{3,4})x(\d{3,4})$',  # name-640x480
+        r'-(\d{3,4})$',             # name-640
+    ]
+
+    for pattern in patterns:
+        match = re.search(pattern, name)
+        if match:
+            if len(match.groups()) == 2:
+                # name-640x480 format
+                width = int(match.group(1))
+                height = int(match.group(2))
+            else:
+                # name-640 format (square)
+                size = int(match.group(1))
+                if size == 0:
+                    # 000 means "use default" (not a valid size)
+                    return None
+                width = height = size
+
+            return (width, height)
+
+    return None
+
+
 def find_camera(max_attempts: int = 10) -> Optional[int]:
     """Find available camera device."""
     for i in range(max_attempts):
@@ -473,6 +520,10 @@ Use export_models.py to download/export models first.
                         help='Confidence threshold (default: 0.25)')
     parser.add_argument('--iou', type=float, default=0.45,
                         help='IoU threshold for NMS (default: 0.45)')
+    parser.add_argument('--size', '-s', type=str, default=None,
+                        help='Input size (e.g., 640, 640x480). If not specified, '
+                             'auto-detected from model name suffix (e.g., model-640.onnx). '
+                             'Use 000 for default 640 (e.g., model-000.onnx)')
     parser.add_argument('--show-fps', action='store_true',
                         help='Display FPS counter')
     parser.add_argument('--list-models', action='store_true',
@@ -523,11 +574,39 @@ def main():
             print(f"  python export_models.py all")
             sys.exit(1)
 
+    # Determine input size
+    input_size = None
+
+    # First, try to get size from command line argument
+    if args.size:
+        # Parse size argument (e.g., "640" or "640x480")
+        size_parts = args.size.lower().split('x')
+        if len(size_parts) == 2:
+            width = int(size_parts[0])
+            height = int(size_parts[1])
+            input_size = (width, height)
+        else:
+            size = int(size_parts[0])
+            if size == 0:
+                size = 640  # Default for 000
+            input_size = (size, size)
+        print(f"📐 Using CLI-specified input size: {input_size}")
+    else:
+        # Auto-detect from model name
+        auto_size = extract_size_from_model(args.model)
+        if auto_size:
+            input_size = auto_size
+            print(f"📐 Auto-detected input size from model name: {input_size}")
+        else:
+            input_size = (640, 640)  # Default
+            print(f"📐 Using default input size: {input_size}")
+
     # Initialize detector
     detector = ONNXDetector(
         str(model_path),
         conf_threshold=args.conf,
-        iou_threshold=args.iou
+        iou_threshold=args.iou,
+        input_size=input_size
     )
 
     if args.image:

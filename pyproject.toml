@@ -3,9 +3,10 @@ name = "vision-tests"
 version = "0.1.0"
 description = "Object detection with RT-DETR, YOLOv9s, YOLOv10s using ONNX and camera"
 requires-python = ">=3.10"
-
-[dependency-groups]
-dev = []
-
-[tool.uv]
-dev-dependencies = []
+dependencies = [
+    "numpy>=1.24.0",
+    "opencv-python>=4.8.0",
+    "onnxruntime>=1.16.0",
+    "ultralytics>=8.0.0",
+    "pillow>=10.0.0",
+]
