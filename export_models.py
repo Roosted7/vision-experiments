@@ -144,7 +144,7 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
         elif half:
             print(f"   Precision: Half (FP16)")
         
-        # Export using ultralytics
+        # Export using ultralytics - use absolute path for project to ensure correct output location
         exported_path = model.export(
             format=export_format,
             imgsz=imgsz,
@@ -153,7 +153,7 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
             end2end=end2end,
             simplify=simplify,
             verbose=False,
-            project=str(output_dir),
+            project=str(output_dir.resolve()),
             name=model_name.replace('.pt', ''),
             exist_ok=True
         )
@@ -193,21 +193,18 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
                 print(f"❌ Export failed for {model_name}: OpenVINO directory not found")
                 return False
         else:
-            # ONNX format
-            # Find the exported ONNX file
-            onnx_files = list(output_dir.glob(f"{base_name}*.onnx"))
-            
-            if onnx_files:
+            # ONNX format - use the path returned by model.export() directly
+            if exported_path.exists() and exported_path.suffix == '.onnx':
                 # Rename to our target if needed
-                if onnx_files[0] != output_path:
+                if exported_path != output_path:
                     if output_path.exists():
                         output_path.unlink()
-                    onnx_files[0].rename(output_path)
+                    exported_path.rename(output_path)
                 
                 print(f"✅ Successfully exported: {model_name} -> {output_path}")
                 return True
             
-            print(f"❌ Export failed for {model_name}: ONNX file not found")
+            print(f"❌ Export failed for {model_name}: ONNX file not found at {exported_path}")
             return False
         
     except Exception as e:
