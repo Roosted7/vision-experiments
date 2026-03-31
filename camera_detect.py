@@ -180,30 +180,21 @@ class ONNXDetector:
         # Output shape: (1, 84, 8400) -> transpose to (1, 8400, 84)
         predictions = outputs[0][0].T  # Now (8400, 84)
 
-        # Check value ranges to determine if sigmoid is already applied
-        # or if the model output is in a narrow range (e.g., half-precision simplified)
-        rest = predictions[:, 4:]  # objectness + class scores
-        sigmoid_applied = rest.max() <= 1.0
+        # The first 4 values are bbox, the rest are 80 class scores
+        class_scores_raw = predictions[:, 4:]
+
+        # Check if sigmoid is already applied
+        sigmoid_applied = np.max(class_scores_raw) <= 1.0 and np.min(class_scores_raw) >= 0.0
 
         if sigmoid_applied:
-            # For quantized/simplified models, scores may be in narrow range
-            # Use column 4 as confidence directly and raw class logits for class ID
-            scores = predictions[:, 4]
-            class_scores_raw = rest[:, 1:]  # Skip index 4, use 5 onwards
-            class_ids = np.argmax(class_scores_raw, axis=1)
+            class_scores = class_scores_raw
         else:
-            # Standard YOLO: apply sigmoid to raw logits
-            obj_scores_raw = predictions[:, 4:5]  # Objectness (8400, 1)
-            class_scores_raw = predictions[:, 5:]  # Class scores (8400, 79)
-
             # Apply sigmoid to get proper probabilities
-            obj_scores = 1.0 / (1.0 + np.exp(-obj_scores_raw))
             class_scores = 1.0 / (1.0 + np.exp(-class_scores_raw))
-            max_class_conf = np.max(class_scores, axis=1, keepdims=True)  # (8400, 1)
-
-            # Combined confidence score
-            scores = (obj_scores * max_class_conf).flatten()
-            class_ids = np.argmax(class_scores, axis=1)
+        
+        # Get the highest score and its class index for each prediction
+        scores = np.max(class_scores, axis=1)
+        class_ids = np.argmax(class_scores, axis=1)
 
         mask = scores > self.conf_threshold
         filtered = predictions[mask]
@@ -225,12 +216,7 @@ class ONNXDetector:
         y2 = cy + h / 2
         boxes = np.column_stack([x1, y1, x2, y2])
 
-        # Get class IDs (need to recalculate if using sigmoid path)
-        if sigmoid_applied:
-            filtered_class_ids = class_ids[mask]
-        else:
-            class_scores_sigmoid = 1.0 / (1.0 + np.exp(-filtered[:, 5:]))
-            filtered_class_ids = np.argmax(class_scores_sigmoid, axis=1)
+        filtered_class_ids = class_ids[mask]
 
         # Apply NMS
         indices = self._nms(boxes, filtered_scores, self.iou_threshold)
@@ -544,26 +530,21 @@ class OpenVINODetector:
         
         predictions = raw_output.T  # (num_anchors, 84)
 
-        # Check value ranges to determine if sigmoid is already applied
-        first_4 = predictions[:, :4]
-        rest = predictions[:, 4:]
-        sigmoid_applied = rest.max() <= 1.0
-        
+        # The first 4 values are bbox, the rest are 80 class scores
+        class_scores_raw = predictions[:, 4:]
+
+        # Check if sigmoid is already applied
+        sigmoid_applied = np.max(class_scores_raw) <= 1.0 and np.min(class_scores_raw) >= 0.0
+
         if sigmoid_applied:
-            # For quantized models (int8), class scores are poorly discriminative
-            # Use index 4 as confidence and pick class based on raw scores
-            scores = predictions[:, 4]
-            class_scores_raw = rest[:, 1:]  # Skip index 4, use 5 onwards
-            
-            # Use raw logits for class determination
-            class_ids = np.argmax(class_scores_raw, axis=1)
+            class_scores = class_scores_raw
         else:
-            # Apply sigmoid to raw values
-            obj_scores = 1.0 / (1.0 + np.exp(-predictions[:, 4]))
-            class_scores = 1.0 / (1.0 + np.exp(-predictions[:, 5:]))
-            max_class_conf = np.max(class_scores, axis=1)
-            scores = obj_scores * max_class_conf
-            class_ids = np.argmax(class_scores, axis=1)
+            # Apply sigmoid to get proper probabilities
+            class_scores = 1.0 / (1.0 + np.exp(-class_scores_raw))
+        
+        # Get the highest score and its class index for each prediction
+        scores = np.max(class_scores, axis=1)
+        class_ids = np.argmax(class_scores, axis=1)
 
         mask = scores > self.conf_threshold
         filtered_scores = scores[mask]

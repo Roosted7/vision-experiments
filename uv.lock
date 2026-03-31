@@ -8,10 +8,6 @@ resolution-markers = [
     "python_full_version < '3.11' and sys_platform != 'win32'",
 ]
 
-[options]
-exclude-newer = "2026-03-24T15:16:53.47300411Z"
-exclude-newer-span = "P7D"
-
 [[package]]
 name = "certifi"
 version = "2026.2.25"
