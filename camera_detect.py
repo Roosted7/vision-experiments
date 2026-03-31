@@ -520,23 +520,36 @@ class OpenVINODetector:
                          ratio: float, pad: Tuple[int, int]) -> List:
         """Postprocess YOLO outputs from OpenVINO.
         
-        OpenVINO YOLO output format: [1, 84, 8400] - same as ONNX
+        OpenVINO YOLO output format: [1, 84, num_anchors] or [84, num_anchors]
         """
-        predictions = outputs[0][0].T  # (8400, 84)
+        raw_output = outputs[0]
+        
+        # Handle both 2D and 3D output
+        if raw_output.ndim == 3:
+            raw_output = raw_output[0]  # Remove batch dimension
+        
+        predictions = raw_output.T  # (num_anchors, 84)
 
-        # Extract raw values
-        obj_scores_raw = predictions[:, 4:5]  # Objectness
-        class_scores_raw = predictions[:, 5:]  # Class scores
+        # Check value ranges to determine if sigmoid is already applied
+        first_4 = predictions[:, :4]
+        rest = predictions[:, 4:]
+        sigmoid_applied = rest.max() <= 1.0
+        
+        if sigmoid_applied:
+            # For quantized models (uint8), scores are often pre-sigmoid
+            # Use index 4 directly as confidence score
+            scores = predictions[:, 4]
+            class_ids = np.argmax(rest[:, 1:], axis=1)  # Skip index 4, use 5 onwards for class
+        else:
+            # Apply sigmoid to raw values
+            obj_scores = 1.0 / (1.0 + np.exp(-predictions[:, 4]))
+            class_scores = 1.0 / (1.0 + np.exp(-predictions[:, 5:]))
+            max_class_conf = np.max(class_scores, axis=1)
+            scores = obj_scores * max_class_conf
+            class_ids = np.argmax(class_scores, axis=1)
 
-        # Apply sigmoid
-        obj_scores = 1.0 / (1.0 + np.exp(-obj_scores_raw))
-        class_scores = 1.0 / (1.0 + np.exp(-class_scores_raw))
-        max_class_conf = np.max(class_scores, axis=1, keepdims=True)
-
-        # Combined confidence
-        combined_scores = (obj_scores * max_class_conf).flatten()
-
-        mask = combined_scores > self.conf_threshold
+        mask = scores > self.conf_threshold
+        filtered_scores = scores[mask]
         filtered = predictions[mask]
 
         if len(filtered) == 0:
@@ -548,6 +561,17 @@ class OpenVINODetector:
         w = filtered[:, 2]
         h = filtered[:, 3]
 
+        # Check if bbox is in pixel coordinates or normalized (0-1)
+        if cx.max() > 1 or cy.max() > 1 or w.max() > 1 or h.max() > 1:
+            # Already in pixel coordinates - no normalization needed
+            pass
+        else:
+            # Normalized to 0-1, scale to input size
+            cx = cx * self.input_size[0]
+            cy = cy * self.input_size[1]
+            w = w * self.input_size[0]
+            h = h * self.input_size[1]
+
         # Convert to corner format (x1, y1, x2, y2)
         x1 = cx - w / 2
         y1 = cy - h / 2
@@ -555,17 +579,12 @@ class OpenVINODetector:
         y2 = cy + h / 2
         boxes = np.column_stack([x1, y1, x2, y2])
 
-        # Get scores
-        obj_sigmoid = 1.0 / (1.0 + np.exp(-filtered[:, 4]))
-        class_conf = np.max(1.0 / (1.0 + np.exp(-filtered[:, 5:])), axis=1)
-        scores = obj_sigmoid * class_conf
-
-        # Get class IDs
-        class_scores_sigmoid = 1.0 / (1.0 + np.exp(-filtered[:, 5:]))
-        class_ids = np.argmax(class_scores_sigmoid, axis=1)
+        # Filter class_ids to valid range
+        filtered_class_ids = class_ids[mask]
+        filtered_class_ids = np.clip(filtered_class_ids, 0, len(COCO_CLASSES) - 1)
 
         # Apply NMS
-        indices = self._nms(boxes, scores, self.iou_threshold)
+        indices = self._nms(boxes, filtered_scores, self.iou_threshold)
 
         pad_w, pad_h = pad
         
@@ -579,9 +598,9 @@ class OpenVINODetector:
             
             results.append({
                 'bbox': [int(x1), int(y1), int(x2), int(y2)],
-                'confidence': float(scores[idx]),
-                'class_id': int(class_ids[idx]),
-                'class_name': COCO_CLASSES[class_ids[idx]] if class_ids[idx] < len(COCO_CLASSES) else f'class_{class_ids[idx]}'
+                'confidence': float(filtered_scores[idx]),
+                'class_id': int(filtered_class_ids[idx]),
+                'class_name': COCO_CLASSES[filtered_class_ids[idx]] if filtered_class_ids[idx] < len(COCO_CLASSES) else f'class_{filtered_class_ids[idx]}'
             })
 
         return results
