@@ -109,9 +109,19 @@ def build_export_kwargs(
         'name': model_name.replace('.pt', ''),
         'exist_ok': True,
     }
-    if opset is not None:
+    if export_format == 'onnx' and opset is not None:
         kwargs['opset'] = opset
     return kwargs
+
+
+def validate_export_options(export_format: str, opset: Optional[int]) -> None:
+    """Validate export options before calling ultralytics."""
+    if opset is None:
+        return
+    if export_format != 'onnx':
+        raise ValueError('--opset is only supported for ONNX format')
+    if opset <= 0:
+        raise ValueError('--opset must be a positive integer')
 
 
 def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
@@ -175,7 +185,7 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
             print(f"   Quantization: UINT8 (INT8)")
         elif half:
             print(f"   Precision: Half (FP16)")
-        if opset is not None:
+        if export_format == 'onnx' and opset is not None:
             print(f"   ONNX opset: {opset}")
         
         # Export using ultralytics - use absolute path for project to ensure correct output location
@@ -193,7 +203,8 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
         try:
             exported_path = model.export(**export_kwargs)
         except TypeError as e:
-            if opset is not None and 'opset' in str(e):
+            error_message = e.args[0] if e.args else str(e)
+            if opset is not None and "unexpected keyword argument 'opset'" in error_message:
                 print("⚠️  opset not supported by this ultralytics version; retrying without opset")
                 export_kwargs.pop('opset', None)
                 exported_path = model.export(**export_kwargs)
@@ -372,8 +383,10 @@ Examples:
         print(f"❌ Error: INT8 quantization is not supported for ONNX format.")
         print(f"   Use --format openvino to export with INT8 quantization.")
         sys.exit(1)
-    if args.opset is not None and args.opset <= 0:
-        print(f"❌ Error: --opset must be a positive integer.")
+    try:
+        validate_export_options(args.format, args.opset)
+    except ValueError as e:
+        print(f"❌ Error: {e}")
         sys.exit(1)
     
     # Default output directory is ./models subdirectory
