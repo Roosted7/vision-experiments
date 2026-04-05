@@ -15,11 +15,13 @@ Examples:
     python export_models.py yolo11n
     python export_models.py yolo26n --size 1280
     python export_models.py yolo26s
+    python export_models.py yolo26s --opset 12
     
 Models will be exported to ./models/ directory.
 
 OpenVINO format supports both FP16 (half) and INT8 (uint8) quantization.
 ONNX format only supports FP16 (int8 is not supported for ONNX).
+Use --opset to control the ONNX opset version when needed for downstream compatibility.
 """
 
 import os
@@ -82,10 +84,40 @@ def get_model_type(model_name: str) -> str:
     return 'unknown'
 
 
-def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640, 
-                      half: bool = False, int8: bool = False, 
+def build_export_kwargs(
+    *,
+    export_format: str,
+    imgsz: int,
+    half: bool,
+    int8: bool,
+    end2end: bool,
+    simplify: bool,
+    output_dir: Path,
+    model_name: str,
+    opset: Optional[int],
+) -> dict:
+    """Build kwargs for ultralytics model.export()."""
+    kwargs = {
+        'format': export_format,
+        'imgsz': imgsz,
+        'half': half,
+        'int8': int8,
+        'end2end': end2end,
+        'simplify': simplify,
+        'verbose': False,
+        'project': str(output_dir.resolve()),
+        'name': model_name.replace('.pt', ''),
+        'exist_ok': True,
+    }
+    if opset is not None:
+        kwargs['opset'] = opset
+    return kwargs
+
+
+def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
+                      half: bool = False, int8: bool = False,
                       export_format: str = 'onnx', end2end: bool = False,
-                      simplify: bool = False) -> bool:
+                      simplify: bool = False, opset: Optional[int] = None) -> bool:
     """Export YOLO model to ONNX or OpenVINO using ultralytics."""
     try:
         from ultralytics import YOLO
@@ -143,20 +175,30 @@ def export_yolo_model(model_name: str, output_dir: Path, imgsz: int = 640,
             print(f"   Quantization: UINT8 (INT8)")
         elif half:
             print(f"   Precision: Half (FP16)")
+        if opset is not None:
+            print(f"   ONNX opset: {opset}")
         
         # Export using ultralytics - use absolute path for project to ensure correct output location
-        exported_path = model.export(
-            format=export_format,
+        export_kwargs = build_export_kwargs(
+            export_format=export_format,
             imgsz=imgsz,
             half=half,
             int8=int8,
             end2end=end2end,
             simplify=simplify,
-            verbose=False,
-            project=str(output_dir.resolve()),
-            name=model_name.replace('.pt', ''),
-            exist_ok=True
+            output_dir=output_dir,
+            model_name=model_name,
+            opset=opset,
         )
+        try:
+            exported_path = model.export(**export_kwargs)
+        except TypeError as e:
+            if opset is not None and 'opset' in str(e):
+                print("⚠️  opset not supported by this ultralytics version; retrying without opset")
+                export_kwargs.pop('opset', None)
+                exported_path = model.export(**export_kwargs)
+            else:
+                raise
         
         if not exported_path:
             print(f"❌ Export failed for {model_name}: no output path returned")
@@ -303,6 +345,9 @@ Examples:
 
   # Simplified ONNX model (adds -simplified suffix to output)
   python export_models.py yolo26n --simplify
+  
+  # Force a specific ONNX opset (useful for some OpenVINO/Frigate setups)
+  python export_models.py yolo26s --opset 12
         """
     )
     parser.add_argument('model', nargs='?', help='Model name (e.g., yolo26n, yolov8s, rtdetr-l) or "all"')
@@ -314,6 +359,8 @@ Examples:
                         choices=['onnx', 'openvino'],
                         help='Export format (default: onnx)')
     parser.add_argument('--end2end', action='store_true', default=False, help='Export with end2end NMS')
+    parser.add_argument('--opset', type=int, default=None,
+                        help='ONNX opset version to export with (e.g., 12)')
     parser.add_argument('--simplify', action='store_true', default=False, 
                         help='Apply simplification to ONNX model (adds -simplified suffix to output)')
     parser.add_argument('--list', '-l', action='store_true', help='List available models')
@@ -324,6 +371,9 @@ Examples:
     if args.int8 and args.format == 'onnx':
         print(f"❌ Error: INT8 quantization is not supported for ONNX format.")
         print(f"   Use --format openvino to export with INT8 quantization.")
+        sys.exit(1)
+    if args.opset is not None and args.opset <= 0:
+        print(f"❌ Error: --opset must be a positive integer.")
         sys.exit(1)
     
     # Default output directory is ./models subdirectory
@@ -349,6 +399,8 @@ Examples:
     print(f"   Type: {model_type}")
     print(f"   Format: {args.format}")
     print(f"   Size: {args.size}")
+    if args.opset is not None:
+        print(f"   Opset: {args.opset}")
     print('='*50)
     
     if model_type == 'yolo':
@@ -361,7 +413,8 @@ Examples:
             int8=args.int8,
             export_format=args.format,
             end2end=args.end2end,
-            simplify=args.simplify
+            simplify=args.simplify,
+            opset=args.opset,
         )
     elif model_type == 'other':
         # Download pre-exported ONNX model

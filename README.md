@@ -45,6 +45,9 @@ uv run export_models.py rtdetr-l
 uv run export_models.py yolo26s --size 320
 uv run export_models.py yolo26s --size 320 --half --simplify
 uv run export_models.py yolo26m --size 320 --format openvino --int8
+
+# Force a specific ONNX opset (useful for some OpenVINO/Frigate setups)
+uv run export_models.py yolo26s --opset 12
 ```
 
 2. **List Available Models**
@@ -91,6 +94,5 @@ uv run camera_detect.py --model yolo26s-320 --image testdata/bad_cam2-no-person.
 ## Controls
 
 - Press `q` or `Esc` to quit the detection window
-
 
 
